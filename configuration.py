@@ -17,7 +17,12 @@ txt_e = colored('ERROR:', 'yellow')
 txt_i = colored('INFO:', 'green')
 IMPORT_MODULE_STRING = '__import__'
 
-print(f"{txt_i} source and target set")
+print(f"{txt_i} source.env\n{source.env}")
+print(f"{txt_i} source.host\n{source.host}")
+print(f"{txt_i} source.db.list()\n{source.db.list()}\n")
+print(f"{txt_i} target.env\n{target.env}")
+print(f"{txt_i} target.host\n{target.host}")
+print(f"{txt_i} target.db.list()\n{target.db.list()}\n")
 
 ''' Glossary
 domain = list of search criterias
@@ -368,6 +373,10 @@ def migrate_model(model, **vars):
                 )
                 return vals
 
+    for key in context: 
+        source.env.context.pop(key)
+        target.env.context.pop(key)
+        
     print(txt_i, f"Done!")
 
 
