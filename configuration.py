@@ -12,9 +12,10 @@ target = odoorpc.ODOO.load('target')
 source.env.context['active_test'] = False
 target.env.context['active_test'] = False
 
-txt_d = colored('DEBUG: MODEL', 'white', 'on_green')
-txt_e = colored('ERROR:', 'yellow')
+txt_d = colored('DEBUG:', 'white', 'on_green')
+txt_e = colored('ERROR:', 'red')
 txt_i = colored('INFO:', 'green')
+txt_w = colored('WARNING:', 'yellow')
 IMPORT_MODULE_STRING = '__import__'
 
 print(f"{txt_i} source.env\n{source.env}")
@@ -100,10 +101,11 @@ def get_target_id_from_source_xmlid(model, source_id):
     Returns: False if record cannot be found
     '''
     domain = [('model', '=', model), ('res_id', '=', source_id)]
-    r_id = source.env['ir.model.data'].search(domain, limit=1)
-    if r_id:
+    for _id in sorted(source.env['ir.model.data'].search(domain)):
         key = 'complete_name'
-        data = source.env['ir.model.data'].read(r_id, [key])[0]
+        data = source.env['ir.model.data'].read(_id, [key])
+        if type(data) is list:
+            data = data[0]
         xmlid = data.get(key, None)
         if xmlid:
             target_id = target.env['ir.model.data'].xmlid_to_res_id(xmlid)
@@ -151,7 +153,6 @@ def migrate_model(model, **vars):
             - create  (bool) - Creates records, set to False to update records, default True
             - custom  (dict) - Updates vals before create/write, default {}
             - debug   (bool) - Shows debug messages, default False
-            - depth   (int)  - Recursively creates missing records in many2one fields if set higher than 0, default 0
             - domain  (list) - Migrate records that matches search criteria, i.e [('name','=','My Company')], default []
             - diff    (dict) - If field names don't match in source and target i.e {'image':'image_1920'}, default {}
             - exclude (list) - Excludes certain fields in source i.e ['email_formatted'], default []
@@ -169,54 +170,64 @@ def migrate_model(model, **vars):
     create = vars.get('create', True)
     custom = vars.get('custom', {})
     debug = vars.get('debug', False)
-    depth = vars.pop('depth', 0)
     domain = vars.get('domain', [])
-    ids = vars.get('ids', [])
+    force = vars.get('force', [])
+    ids = vars.pop('ids', [])
     model2 = vars.get('model2', model)
     source.env.context.update(context)
     target.env.context.update(context)
 
     if debug:
-        print(f"{txt_d} source context:{source.env.context}")
-        print(f"{txt_d} target context:{target.env.context}")
-        print(f"{txt_d} model:{model}")
-        print(f"{txt_d} vars:{vars}")
+        print(f'''
+{txt_d} Source context: {source.env.context}
+{txt_d} Target context: {target.env.context}
+{txt_d} vars: {vars}
+''')
 
     source_model = source.env[model]
-    source_fields = source_model.fields_get()
     target_model = target.env[model2]
+
+    source_fields = source_model.fields_get()
     target_fields = target_model.fields_get()
-    common_fields = get_common_fields(source_fields, target_fields, **vars)
+    fields = get_common_fields(source_fields, target_fields, **vars)
+
     source_ids = ids if ids else sorted(source_model.search(domain))
     if not source_ids:
         f"{txt_i} No records to migrate..."
+
+    if create:
+        source_ids = find_all_ids_in_target_model(model2, source_ids)
+
+# MAIN LOOP
     for source_id in source_ids:
-        print(f"{txt_d} {model} {source_id}") if debug else None
+        target_id = 0 if create else get_target_id_from_source_id(
+            model2, source_id)
 
-        target_record = get_target_id_from_source_id(model2, source_id)
-        if debug:
-            print(f"{txt_d} target_record{target_record} {model2}")
+        print(f'''{txt_d} Source record: '{model}' {source_id}
+{txt_d} Target record: '{model2}' {target_id}''') if debug else None
 
-        if not target_record:
-            if debug:
+        if not target_id:
+            # if debug:
+            print(f"{txt_d} No record found with __import__.{model2.replace('.', '_')}_{source_id} external identifier") if debug else None
+            target_id = get_target_id_from_source_xmlid(model2, source_id)
+
+        if create and target_id:
+            print(
+                f"{txt_w} SOURCE: {model} {source_id} | TARGET: {model2} {target_id} | CREATE: FAIL! External id exists..."
+            )
+            continue
+
+        if not create and not target_id:
+            if not force:
                 print(
-                    f"{txt_d} No record found with __import__.{model2.replace('.', '_')}_{source_id} external identifier")
-            target_record = get_target_id_from_source_xmlid(model2, source_id)
-
-        if create and target_record:
+                    f"{txt_w} SOURCE: {model} {source_id} | TARGET: {model2} {target_id} | WRITE: FAIL! External id exists...")
+                continue
             print(
-                f"{txt_i} SOURCE: {model} {source_id} | TARGET: {model2} {target_record} | CREATE: FAIL! External id exists..."
-            )
-            continue
+                f"{txt_i} FORCE = TRUE: External id exists...Trying to write to record")
 
-        if not create and not target_record:
-            print(
-                f"{txt_i} SOURCE: {model} {source_id} | TARGET: {model2} {target_record} | WRITE: FAIL! External id exists..."
-            )
-            continue
         vals = {}
         try:
-            source_record = source_model.read(source_id, list(common_fields))
+            record = source_model.read(source_id, list(fields))
         except:
             print(
                 f"{txt_e} SOURCE: {model} {source_id} READ: FAIL! Does the record exist?")
@@ -225,44 +236,36 @@ def migrate_model(model, **vars):
             continue
 
         # Customize certain fields before creating records
-        for key in common_fields:
-            if not calc or key not in calc.keys():
-                key_type = source_fields[key]['type']
+        for key in sorted(fields):
+            key_type = source_fields[key]['type']
+            val = record[key]
 
-                if debug:
-                    print(f"{txt_d} {key} {key_type}")
+            if debug:
+                print(f"{txt_d}     Field: {key}, Type: {key_type}")
+                print(f"{txt_d}         Source value: {val}")
+
+            if not val:
+                print('')
+                continue
+
+            if key not in calc.keys():
 
                 if key_type == 'many2one':
-                    if not source_record[key]:
-                        continue
-                    relation = key_type = source_fields[key]['relation']
-
-                    if debug:
-                        print(f"{txt_d} {key} {relation}")
-
+                    relation = target_fields[key]['relation']
                     relation_id = get_target_id_from_source_id(
-                        relation, source_record[key][0])
+                        relation, record[key][0])
                     if not relation_id:
                         relation_id = get_target_id_from_source_xmlid(
-                            relation, source_record[key][0])
-                    if not relation_id and depth:
-                        relation_id = migrate_model(
-                            relation, depth=depth-1, **vars)
+                            relation, record[key][0])
                     if type(relation_id) is dict or not relation_id:
                         continue
-                    vals.update({common_fields[key]: relation_id})
+                    val = relation_id
 
                 elif key_type == 'many2many':
-                    if not source_record[key]:
-                        continue
-                    relation = key_type = source_fields[key]['relation']
-
-                    if debug:
-                        print(f"{txt_d} {key} {relation}")
-
+                    relation = target_fields[key]['relation']
                     key_ids = []
                     values = 0
-                    for many_id in source_record[key]:
+                    for many_id in record[key]:
                         relation_id = get_target_id_from_source_id(
                             relation, many_id)
                         if not relation_id:
@@ -278,19 +281,13 @@ def migrate_model(model, **vars):
                             values = [tuple(values)]
                     else:
                         values = key_ids
-                    vals.update({common_fields[key]: values})
+                    val = values
 
                 elif key_type == 'one2many':
-                    if not source_record[key]:
-                        continue
-                    relation = key_type = source_fields[key]['relation']
-
-                    if debug:
-                        print(f"{txt_d} {key} {relation}")
-
+                    relation = source_fields[key]['relation']
                     key_ids = []
                     values = 0
-                    for many_id in source_record[key]:
+                    for many_id in record[key]:
                         relation_id = get_target_id_from_source_id(
                             relation, many_id)
                         if not relation_id:
@@ -306,77 +303,77 @@ def migrate_model(model, **vars):
                             values = [tuple([6, 0, key_ids])]
                     else:
                         values = key_ids
-                    vals.update({common_fields[key]: values})
+                    val = values
 
                 elif key_type == 'integer':
-                    if key == 'res_id' and 'res_model' in source_record:
-                        res_model = source_record['res_model']
+                    if key == 'res_id' and 'res_model' in record:
+                        res_model = record['res_model']
                         if not res_model:
                             continue
-                        res_id = get_target_id_from_source_id(
-                            res_model, source_record[key])
-                        if not res_id:
-                            res_id = get_target_id_from_source_xmlid(
-                                res_model, source_record[key])
-                        if not res_id:
-                            continue
-                        else:
-                            vals.update({common_fields[key]: res_id})
-                            continue
-                    vals.update({common_fields[key]: source_record[key]})
+                        val = get_target_id_from_source_id(
+                            res_model, record[key])
+                        if not val:
+                            val = get_target_id_from_source_xmlid(
+                                res_model, record[key])
 
                 elif key_type == 'char':
-                    val = source_record[key]
                     if key == 'arch':
-                        val = update_images(source_record[key])
+                        val = update_images(record[key])
 
                     # Remove /page if it exists in url (odoo v8 -> odoo 14)
-                    elif key == 'url' and type(source_record[key]) is str:
-                        val = source_record[key]
+                    elif key == 'url' and type(record[key]) is str:
                         if val.startswith('/page'):
                             val = val.replace('/page', '')
 
-                    vals.update({common_fields[key]: val})
+                vals.update({fields[key]: val})
 
-                elif key_type in ['binary', 'boolean', 'date', 'datetime', 'float', 'selection']:
-                    vals.update({common_fields[key]: source_record[key]})
-                # else:
-                #     vals.update({common_fields[key]: source_record[key]})
+            print(f'''{txt_d}         Target value: {val}
+''') if debug else None
 
         vals.update(custom)
+
+        print(f"{txt_d} Custom value: {custom}") if debug and custom else None
 
         if calc:
             for key in calc.keys():
                 exec(calc[key])
 
         # Break operation and return last dict used for creating record if something is wrong and debug is True
-        if create:
+        if create and vals:
             create_id = create_record_and_xmlid(
                 model, model2, vals, source_id)
             if not create_id:
                 return vals
             elif ids and len(ids) == 1:
                 return create_id
-        elif target_record:
+        elif target_id or force:
             try:
-                success = target_model.browse(target_record).write(vals)
+                success = target_model.write(target_id, vals)
                 if success:
                     print(
-                        f"{txt_i} SOURCE: {model} {source_id} TARGET: {model2} {target_record} WRITE: SUCCESS!!!"
+                        f"{txt_i} SOURCE: {model} {source_id} TARGET: {model2} {target_id} WRITE: SUCCESS!!!"
                     )
                 else:
-                    print(target_record)
+                    print(target_id)
                     return vals
             except:
-                print(
-                    f"{txt_e} SOURCE: {model} {source_id} TARGET: {model2} {target_record} WRITE: FAIL!"
-                )
-                return vals
+                if not force:
+                    print(
+                        f"{txt_e} SOURCE: {model} {source_id} TARGET: {model2} {target_id} WRITE: FAIL!"
+                    )
+                    return vals
+                else:
+                    create_id = create_record_and_xmlid(
+                        model, model2, vals, source_id)
+                    if not create_id:
+                        return vals
+                    elif ids and len(ids) == 1:
+                        return create_id
 
-    for key in context: 
+    for key in context:
         source.env.context.pop(key)
         target.env.context.pop(key)
-        
+
     print(txt_i, f"Done!")
 
 
@@ -402,28 +399,6 @@ def get_common_fields(source_fields, target_fields, **vars):
         else:
             if key in target_fields:
                 fields.update({key: key})
-
-    fields.update(diff)
-
-    return fields
-
-
-def get_all_fields(model, exclude=[], diff={}):
-    '''
-    Returns dict with key as source model keys and value as target model keys
-
-    Use exclude = ['this_field', 'that_field'] to exclude keys on source model
-
-    Use diff = {'image':'image_1920'} to update key-value pairs manually
-    '''
-    fields = {}
-    target_field_keys = target.env[model]._columns
-
-    for key in source.env[model]._columns:
-        if key in exclude:
-            continue
-        elif key in target_field_keys:
-            fields.update({key: key})
 
     fields.update(diff)
 
@@ -475,7 +450,7 @@ def print_relation_fields(model, model2=''):
             key_type = source_fields[key]['type']
             text = 'relation: {:<30} type: {:<10} key: {:<30}'
             print(text.format(relation, key_type, key))
-    input(f"{txt_i} Press a key to continue")
+    input(f"{txt_i} Press ENTER key to continue")
     print('target')
     for key in sorted(target_fields):
         if target_fields[key].get('relation', None):
@@ -499,45 +474,56 @@ def print_list(my_list, rows=40):
 
 
 def compare_records(model, source_id, key_len=150, rows=14):
-    source_fields = source.env[model].fields_get()
-    target_fields = target.env[model].fields_get()
-    keys = sorted(set(list(source_fields)+list(target_fields)))
-    count = 1
-    target_id = get_target_id_from_source_id(model, source_id)
-    if not target_id:
-        target_id = get_target_id_from_source_xmlid(model, source_id)
-    for key in keys:
-        source_val = source_rel = source_type = ''
-        target_val = target_rel = target_type = ''
-        if count % rows == 1:
-            print(
-                f"{'field name':^40}{'source type':^20}{'source model':^20}{'target type':^20}{'target model':^20}")
-        if key in source_fields:
-            source_type = source_fields[key]['type']
-            if source_type in ['many2many', 'many2one', 'one2many']:
-                source_rel = source_fields[key]['relation']
-            try:
-                source_val = str(source.env[model].read(source_id, [key])[
-                    0].get(key, 'Key not found'))[:key_len]
-            except:
-                source_val = 'error'
+    if type(model) is str:
+        model = {model: model}
+    for s, t in model.items():
+        source_fields = source.env[s].fields_get()
+        target_fields = target.env[t].fields_get()
+        keys = sorted(set(list(source_fields)+list(target_fields)))
+        count = 1
+        target_id = get_target_id_from_source_id(t, source_id)
+        if not target_id:
+            target_id = get_target_id_from_source_xmlid(s, source_id)
+        for key in keys:
+            source_val = source_rel = source_type = ''
+            target_val = target_rel = target_type = ''
+            if count % rows == 1:
+                print(
+                    f"{'field name':^40}{'source type':^20}{'source model':^20}{'target type':^20}{'target model':^20}")
+            if key in source_fields:
+                source_type = source_fields[key]['type']
+                if source_type in ['many2many', 'many2one', 'one2many']:
+                    source_rel = source_fields[key]['relation']
+                try:
+                    source_val = source.env[s].read(source_id, [key])
+                    if type(source_val) is list:
+                        source_val = source_val[0]
+                    source_val = str(source_val.get(
+                        key, 'Key not found'))[:key_len]
+                except:
+                    source_val = 'error'
+            else:
+                source_val = colored('Key not found', 'red')
 
-        if key in target_fields:
-            target_type = target_fields[key]['type']
-            if target_type in ['many2many', 'many2one', 'one2many']:
-                target_rel = target_fields[key]['relation']
-            try:
-                target_val = str(target.env[model].read(target_id, [key])[
-                    0].get(key, 'Key not found'))[:key_len]
-            except:
-                target_val = 'error'
+            if key in target_fields:
+                target_type = target_fields[key]['type']
+                if target_type in ['many2many', 'many2one', 'one2many']:
+                    target_rel = target_fields[key]['relation']
+                try:
+                    target_val = str(target.env[t].read(target_id, [key])[
+                        0].get(key, 'Key not found'))[:key_len]
+                except:
+                    target_val = 'error'
 
-        print(f"""{key:^40}{source_type:^20}{source_rel:^20}{target_type:^20}{target_rel:^20}
+            else:
+                target_val = colored('Key not found', 'red')
+
+            print(f"""{key:^40}{source_type:^20}{source_rel:^20}{target_type:^20}{target_rel:^20}
 S {source_val}
 T {target_val}""")
-        if count % rows == 0:
-            input()
-        count = count+1
+            if count % rows == 0:
+                input()
+            count = count+1
 
 
 def create_new_webpages(model, ids=[]):
@@ -616,48 +602,45 @@ def update_images(arch):
     return str(soup)
 
 
+def find_all_ids_in_target_model(target_model, ids=[]):
+    print(target_model)
+    target_ids = target.env["ir.model.data"].find_all_ids_in_target(
+        target_model)
+    # ~ print(f"source_ids: {ids}")
+    # ~ print("="*99)
+    # ~ print(f"target_ids: {target_ids}")
+    to_migrate = (set(ids) - set(target_ids))
+    return to_migrate
+
+
+def compare(model, source_id=0):
+    if type(model) is str:
+        model = {model: model}
+    s = list(model)[0]
+    t = model[s]
+    if not source_id:
+        source_id = sorted(source.env[s].search([]))[0]
+    count = 0
+    fields = sorted(set(
+        [x['name'] for x in source.env['ir.model.fields'].search_read([('model', '=', s)], ['name'])] +
+        [x['name'] for x in target.env['ir.model.fields'].search_read([('model', '=', t)], ['name'])]))
+    for key in fields:
+        count += 1
+        print(count, end=' ')
+        try:
+            print(colored(f'{key}', 'green'),
+                  f'{source.env[s].read(source_id,[key])[key]}')
+        except:
+            print(colored(f"key error ({colored(key,'green')}{colored(')','red')}", 'red'))
+
+        space = ' '*(len(str(count))+len(key)+1)
+        try:
+            print(space,
+                  f'{target.env[t].read(get_target_id_from_source_id(t, source_id), [key])[0][key]}')
+        except:
+            print(colored(f'key error ({key})', 'red'))
+        if count % 10 == 0:
+            input('Press ENTER to continue')
+
+
 print(f"{txt_i} functions loaded")
-
-'''
-model = 'mail.activity'
-one=0
-domain=[]
-include=[]
-exclude = []
-diff = {}
-model2 = model
-source_model = source.env[model]
-source_fields = source_model.fields_get()
-target_model = target.env[model2]
-target_fields = target_model.fields_get()
-common_fields = get_common_fields(
-    source_fields, target_fields, include=include, exclude=exclude, diff=diff)
-source_ids = one if one else sorted(
-    filter(lambda x: type(x) is int, source_model.search(domain)))
-source_id = 66
-new_record = {}
-target_record = get_target_id_from_source_xmlid(model, source_id)
-source_record = source_model.read(source_id, list(common_fields))[0]
-key = 'message_id'
-key_type = source_fields[key]['type']
-
-model='project.task.type'
-for x in sorted(source.env[model].search([])):
-    print(x, source.env[model].browse(x).name)
-    if x % 10 == 0:
-        input()
-for x in sorted(target.env[model].search([])):
-    print(x, target.env[model].browse(x).name)
-    if x % 10 == 0:
-        input()
-
-model='sale.report'
-print('source')
-for x,y in source.env[model].fields_get().items():
-    if y.get('relation',None):
-        print('key: {:<25} relation: {:<25}'.format(x,y['relation']))
-print('target')
-for x,y in target.env[model].fields_get().items():
-    if y.get('relation',None):
-        print('key: {:<25} relation: {:<25}'.format(x,y['relation']))
-'''
