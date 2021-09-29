@@ -1,16 +1,36 @@
 #!/usr/bin/env python3
-import odoorpc
-from termcolor import colored, cprint
 import http.client as http
+from termcolor import colored, cprint
+from PIL import Image
+import sys
+import datetime
+import argparse
+import json
+import logging
+import logging.handlers
+import os
+import pprint
+import re
+
+import pprint
+pp = pprint.PrettyPrinter()
+
+
+try:
+    import odoorpc
+except ImportError:
+    raise Warning(
+        'odoorpc library missing. Please install the library. Eg: pip3 install odoorpc')
+
+
 http.HTTPConnection._http_vsn = 10
 http.HTTPConnection._http_vsn_str = 'HTTP/1.0'
 
-
-# from credentials import *
 source = odoorpc.ODOO.load('source')
 target = odoorpc.ODOO.load('target')
-source.env.context['active_test'] = False
-target.env.context['active_test'] = False
+odoorpc_context = {'active_test': False, 'active_test': False}
+source.env.context.update(odoorpc_context)
+target.env.context.update(odoorpc_context)
 
 txt_d = colored('DEBUG:', 'white', 'on_green')
 txt_e = colored('ERROR:', 'red')
@@ -37,36 +57,40 @@ source = source database
 target = target database
 '''
 
-# HELPER FUNCTIONS
-
 
 def unlink(model, only_migrated=True):
-    ''' unlinks all records of a model in target database
+    """ unlinks all records of a model in target database
     example: unlink('res.partner')
-    '''
+    """
     record_list = []
     if only_migrated:
         domain = [('module', '=', IMPORT_MODULE_STRING), ('model', '=', model)]
-        data_ids = target.env['ir.model.data'].search(domain)
-        data_recordset = target.env['ir.model.data'].browse(data_ids)
-        for record in data_recordset:
-            record_list.append(record.res_id)
+        record_list = sorted((x.get('res_id') for x in target.env['ir.model.data'].search_read(
+            domain, ['res_id'])), reverse=1)
     else:
-        record_list = target.env[model].search([])
+        record_list = sorted(target.env[model].search([]), reverse=1)
 
     try:
-        target.env[model].browse(record_list).unlink()
+        target.env[model].unlink(record_list)
         print(
             f"{txt_i} Recordset('{model}', {record_list}) unlinked"
         )
     except Exception as e:
         print(e)
+        choice = input(
+            'Unlinking failed, try to unlink one record at a time? [y/N]')
+        if choice.lower() != 'n' or choice != '':
+            for x in record_list:
+                try:
+                    target.env[model].unlink(x)
+                except Exception as e:
+                    print(e)
 
 
 def create_xmlid(model, target_record_id, source_record_id):
-    ''' Creates an external id for a model
+    """ Creates an external id for a model
     example: create_xml_id('product.template', 89122, 5021)
-    '''
+    """
 
     xml_id = f"{IMPORT_MODULE_STRING}.{model.replace('.', '_')}_{source_record_id}"
     values = {
@@ -85,21 +109,21 @@ def create_xmlid(model, target_record_id, source_record_id):
 
 
 def get_target_id_from_source_id(model, source_id):
-    '''
+    """
     Returns id from target using id from source
     Ex, get_target_id_from_source_id('product.attribute', 3422)
     Returns: False if record cannot be found
-    '''
+    """
     xmlid = f"{IMPORT_MODULE_STRING}.{model.replace('.', '_')}_{source_id}"
     return target.env['ir.model.data'].xmlid_to_res_id(xmlid)
 
 
 def get_target_id_from_source_xmlid(model, source_id):
-    '''
+    """
     Returns id from target using source xmlid
     Ex, get_target_id_from_source_xmlid('res.company', 1)
     Returns: False if record cannot be found
-    '''
+    """
     domain = [('model', '=', model), ('res_id', '=', source_id)]
     for _id in sorted(source.env['ir.model.data'].search(domain)):
         key = 'complete_name'
@@ -115,14 +139,14 @@ def get_target_id_from_source_xmlid(model, source_id):
 
 
 def create_record_and_xmlid(model, model2, fields, source_id):
-    '''
+    """
     Creates record on target if it doesn't exist, using fields as values,
     and creates an external id so that the record will not be duplicated if function is called next time
 
     Example: create_record_and_xml_id('res.partner', {'name':'MyPartner'}, 2)
 
     Returns 0 if function fails
-    '''
+    """
     target_id = get_target_id_from_source_id(model2, source_id)
     if target_id:
         print(f"{txt_i} External id already exist ({model2} {source_id})")
@@ -140,7 +164,7 @@ def create_record_and_xmlid(model, model2, fields, source_id):
 
 
 def migrate_model(model, **vars):
-    '''
+    """
     Use this method for migrating model from source to target
     - Example: migrate_model('res.partner')
     - Keyworded arguments default values:
@@ -163,7 +187,8 @@ def migrate_model(model, **vars):
     Returns
         - vals (dict) if create/write fails
         - id   (int)  if create succeeds
-    '''
+    """
+    bypass_date = vars.get('bypass_date', False)
     calc = vars.get('calc', {})
     command = vars.get('command', {})
     context = vars.get('context', {})
@@ -178,11 +203,11 @@ def migrate_model(model, **vars):
     target.env.context.update(context)
 
     if debug:
-        print(f'''
+        print(f"""
 {txt_d} Source context: {source.env.context}
 {txt_d} Target context: {target.env.context}
 {txt_d} vars: {vars}
-''')
+""")
 
     source_model = source.env[model]
     target_model = target.env[model2]
@@ -191,30 +216,30 @@ def migrate_model(model, **vars):
     target_fields = target_model.fields_get()
     fields = get_common_fields(source_fields, target_fields, **vars)
 
-    source_ids = ids if ids else sorted(source_model.search(domain))
+    source_ids = ids if ids else source_model.search(domain, order='id')
     if not source_ids:
         f"{txt_i} No records to migrate..."
 
     if create:
         source_ids = find_all_ids_in_target_model(model2, source_ids)
-
+    now = datetime.datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S")
 # MAIN LOOP
     for source_id in source_ids:
         target_id = 0 if create else get_target_id_from_source_id(
             model2, source_id)
 
-        print(f'''{txt_d} Source record: '{model}' {source_id}
-{txt_d} Target record: '{model2}' {target_id}''') if debug else None
+        print(f"{txt_d} Source record: '{model}' {source_id}"
+              "{txt_d} Target record: '{model2}' {target_id}") if debug else None
 
         if not target_id:
             # if debug:
-            print(f"{txt_d} No record found with __import__.{model2.replace('.', '_')}_{source_id} external identifier") if debug else None
+            print(f"{txt_d} No record found with __import__.{model2.replace('.', '_')}"
+                  "_{source_id} external identifier") if debug else None
             target_id = get_target_id_from_source_xmlid(model2, source_id)
 
         if create and target_id:
-            print(
-                f"{txt_w} SOURCE: {model} {source_id} | TARGET: {model2} {target_id} | CREATE: FAIL! External id exists..."
-            )
+            print(f"{txt_w} SOURCE: {model} {source_id} | TARGET: {model2} {target_id}"
+                  " | CREATE: FAIL! External id exists...")
             continue
 
         if not create and not target_id:
@@ -225,15 +250,28 @@ def migrate_model(model, **vars):
             print(
                 f"{txt_i} FORCE = TRUE: External id exists...Trying to write to record")
 
-        vals = {}
+        vals = {'last_migration_date': now}
         try:
             record = source_model.read(source_id, list(fields))
+            if not record:
+                print(f'{source_id} does not exist...')
+                continue
         except:
             print(
                 f"{txt_e} SOURCE: {model} {source_id} READ: FAIL! Does the record exist?")
             if debug:
                 return source_id
             continue
+
+        if not create:
+            last_migration_date = record.get('last_migration_date')
+            if not last_migration_date:
+                last_migration_date = str(datetime.datetime(2000, 1, 1))
+            write_date = record.get('write_date')
+            if not write_date:
+                write_date = '0'
+            if not bypass_date and last_migration_date > write_date:
+                continue
 
         # Customize certain fields before creating records
         for key in sorted(fields):
@@ -244,13 +282,13 @@ def migrate_model(model, **vars):
                 print(f"{txt_d}     Field: {key}, Type: {key_type}")
                 print(f"{txt_d}         Source value: {val}")
 
-            if not val:
-                print('')
-                continue
+            # if not val:
+            #     print('')
+            #     continue
 
             if key not in calc.keys():
 
-                if key_type == 'many2one':
+                if key_type == 'many2one' and val:
                     relation = target_fields[key]['relation']
                     relation_id = get_target_id_from_source_id(
                         relation, record[key][0])
@@ -261,7 +299,7 @@ def migrate_model(model, **vars):
                         continue
                     val = relation_id
 
-                elif key_type == 'many2many':
+                elif key_type == 'many2many' and val:
                     relation = target_fields[key]['relation']
                     key_ids = []
                     values = 0
@@ -283,7 +321,7 @@ def migrate_model(model, **vars):
                         values = key_ids
                     val = values
 
-                elif key_type == 'one2many':
+                elif key_type == 'one2many' and val:
                     relation = source_fields[key]['relation']
                     key_ids = []
                     values = 0
@@ -327,8 +365,7 @@ def migrate_model(model, **vars):
 
                 vals.update({fields[key]: val})
 
-            print(f'''{txt_d}         Target value: {val}
-''') if debug else None
+            print(f"""{txt_d}         Target value: {val}""") if debug else None
 
         vals.update(custom)
 
@@ -377,17 +414,18 @@ def migrate_model(model, **vars):
     print(txt_i, f"Done!")
 
 
-def get_common_fields(source_fields, target_fields, **vars):
-    '''
-    Returns dict with key as source model keys and value as target model keys
-
-    Use exclude = ['this_field', 'that_field'] to exclude keys on source model
-
-    Use diff = {'image':'image_1920'} to update key-value pairs manually
-    '''
-    diff = vars.get('diff', {})
-    exclude = vars.get('exclude', [])
-    include = vars.get('include', [])
+def get_common_fields(source_fields, target_fields, **kwargs):
+    """
+    Returns dict with key as source model fields and value as target model fields
+    :param source_fields: dict, use source.env[model].fields_get()
+    :param target_fields: dict, use target.env[model].fields_get()
+    :param diff: dict, different fields on target i.e. {'image':'image_1920'}
+    :param exclude: list, fields to exclude on source model ['message_follower_ids']
+    :param include: list, fields to include on source model ['partner_id']
+    """
+    diff = kwargs.get('diff', {})
+    exclude = kwargs.get('exclude', [])
+    include = kwargs.get('include', [])
     fields = {}
 
     for key in source_fields:
@@ -406,11 +444,11 @@ def get_common_fields(source_fields, target_fields, **vars):
 
 
 def get_fields_difference(model):
-    '''
+    """
     Returns list with fields difference
 
     Example: get_fields_difference('res.company')
-    '''
+    """
     source_set = set(source.env[model]._columns)
     target_set = set(target.env[model]._columns)
 
@@ -421,11 +459,11 @@ def get_fields_difference(model):
 
 
 def get_required_fields(model):
-    '''
+    """
     Returns list with required fields
 
     Example: get_required_fields('res.company')
-    '''
+    """
     source_dict = source.env[model].fields_get()
     target_dict = target.env[model].fields_get()
     source_keys = []
@@ -440,7 +478,7 @@ def get_required_fields(model):
 
 
 def print_relation_fields(model, model2=''):
-    '''Prints model name for relation fields'''
+    """Prints model name for relation fields"""
     source_fields = source.env[model].fields_get()
     target_fields = target.env[model2 or model].fields_get()
     print('source')
@@ -527,8 +565,8 @@ T {target_val}""")
 
 
 def create_new_webpages(model, ids=[]):
-    ''' Creates new website pages on target using source pages' arch
-    '''
+    """ Creates new website pages on target using source pages' arch
+    """
     if not ids:
         ids = sorted(source.env[model].search([]))
     for _ in ids:
@@ -609,7 +647,7 @@ def find_all_ids_in_target_model(target_model, ids=[]):
     # ~ print(f"source_ids: {ids}")
     # ~ print("="*99)
     # ~ print(f"target_ids: {target_ids}")
-    to_migrate = (set(ids) - set(target_ids))
+    to_migrate = sorted(set(ids) - set(target_ids))
     return to_migrate
 
 
@@ -631,7 +669,8 @@ def compare(model, source_id=0):
             print(colored(f'{key}', 'green'),
                   f'{source.env[s].read(source_id,[key])[key]}')
         except:
-            print(colored(f"key error ({colored(key,'green')}{colored(')','red')}", 'red'))
+            print(
+                colored(f"key error ({colored(key,'green')}{colored(')','red')}", 'red'))
 
         space = ' '*(len(str(count))+len(key)+1)
         try:
@@ -641,6 +680,55 @@ def compare(model, source_id=0):
             print(colored(f'key error ({key})', 'red'))
         if count % 10 == 0:
             input('Press ENTER to continue')
+
+
+def find_field_diff(model, field, values):
+    """Returns list of ids where field values mismatch
+    :param model: str
+    :param field: str
+    :param value: list
+    """
+    print(model, field, values)
+    res_ids = sorted(x.get('res_id') for x in target.env['ir.model.data'].search_read(
+        [('module', '=', '__import__'), ('model', '=', model)], ['res_id']))
+    ids = []
+    for value in values:
+        source_ids = source.env[model].search([(field, '=', value)])
+        target_ids = target.env[model].search(
+            [('id', '=', res_ids), (field, '=', value)])
+        migrated_ids = sorted(int(x.get('name').split('_')[-1]) for x in target.env['ir.model.data'].search_read(
+            [('module', '=', '__import__'), ('model', '=', model), ('res_id', '=', target_ids)], ['name']))
+        diff = sorted(set(migrated_ids)-set(source_ids))
+        if diff:
+            print(f'value:  {value}')
+            print(f'source: {len(source_ids)}')
+            print(f'target: {len(target_ids)}')
+            ids += diff
+            print(f'diff  : {diff}')
+
+    return ids
+
+
+def check_field(m, f):
+    def get_list_item(x):
+        return x[1] if type(x) is list else x
+    i = 'id'
+    st_ids = {int(x['name'].split('_')[-1]): x['res_id']
+              for x in target.env['ir.model.data'].search_read([
+                  ('module', '=', '__import__'),
+                  ('model', '=', m)], order='name')}
+    s = source.env[m]
+    t = target.env[m]
+    sids = {x[i]: x[f] for x in s.read(
+        sorted(target.env['ir.model.data'].find_all_ids_in_target(m)), [f])}
+    tids = {x[i]: x[f] for x in t.search_read([], [f], order=i)}
+    for sid in sids:
+        tid = st_ids[sid]
+        sf = get_list_item(sids[sid])
+        tf = get_list_item(tids[tid])
+        if not sf == tf:
+            print(f"s({sid}):", sf, "!=", f"({tid}):", tf)
+    print('DONE!')
 
 
 print(f"{txt_i} functions loaded")

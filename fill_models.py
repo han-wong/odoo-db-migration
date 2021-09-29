@@ -1,29 +1,36 @@
-from odoorpc.session import get
 from configuration import *
 
 models = {
-    'project.task.type': 'project.task.type',               # 36,   14-1
-    'project.category': 'project.tags',  # 259   1    , 3 duplicates in source
-    'project.project': 'project.project',                   # 46,   5-2
-    'project.task': 'project.task',                         # 4077, 56-4
-    'account.analytic.account': 'account.analytic.account',  # 59,
-    'project.sprint.type': 'project.sprint.type',
-    'project.scrum.actors': 'project.scrum.actors',
-    'project.scrum.portfolio': 'project.scrum.portfolio',   # 18,   6-1
-    'project.scrum.sprint': 'project.scrum.sprint',         # 138,  3-1
-    'project.scrum.us': 'project.scrum.us',                 # 1,    2-1
-    'project.scrum.timebox': 'project.scrum.timebox',       # 87,   1-1
-    'project.scrum.test': 'project.scrum.test',             # 0
-    'project.task.work': 'account.analytic.line',           # 6180, 1-,
+    'project.task.type': {},        # 36,   14-1
+    'project.category': {           # 259   1   , 3 duplicates in source
+        'model': 'project.tags'},
+    'project.project': {},          # 46,   5-2
+    'project.task': {},             # 4080, 56-4
+    'account.analytic.account': {   # 45
+        'domain': [('id', '=', sorted(set([x.get('analytic_account_id')[0] for x in source.env['project.project'].search_read([], ['analytic_account_id'])])))]},  # 59,
+    'project.task.work': {          # 6232
+        'model': 'account.analytic.line',
+        'domain': [('hr_analytic_timesheet_id', '!=', False)]},
+    'mail.message': {               # 35627, 9 messages have res_id as 0
+        'domain': [('model', '=', 'project.task'), ('res_id', '!=', False)]},
+    'project.sprint.type': {},      # 3
+    'project.scrum.actors': {},     # 0
+    'project.scrum.portfolio': {},  # 18,   6-1
+    'project.scrum.sprint': {},     # 138,  3-1
+    'project.scrum.us': {},         # 1,    2-1
+    'project.scrum.timebox': {},    # 87,   1-1
+    'project.scrum.test': {},       # 0
 }
 
-for s, t in models.items():
+for s in models:
     try:
-        s_count = len(source.env[s].search([]))
-        t_count = len(target.env[t].search([]))
-        m_count = len(target.env['ir.model.data'].find_all_ids_in_target(t))
+        domain = models.get(s).get('domain', [])
+        s_count = len(source.env[s].search(domain))
         print('source model', s, s_count)
+        t = models.get(s).get('model', s)
+        t_count = len(target.env[t].search([]))
         print('target model', t, t_count)
+        m_count = len(target.env['ir.model.data'].find_all_ids_in_target(t))
         print('migrated', m_count)
         if m_count < s_count:
             print(colored(f"missing {t} {s_count-m_count}", 'red'))
@@ -38,26 +45,29 @@ migrate_model('project.task.type')
 for _id in sorted(source.env['project.category'].search([])):
     migrate_model('project.category', ids=[_id], model2='project.tags')
 
-# source.env[model].search([('name', '=', 'packning')])     # [76, 77]
-# source.env[model].search([('name', '=', 'El')])           # [96, 100]
-# source.env[model].search([('name', '=', 'Release 1')])    # [259, 260]
-create_xmlid('project.tags', get_target_id_from_source_id(
-    'project.tags', 76), 77)
-create_xmlid('project.tags', get_target_id_from_source_id(
-    'project.tags', 96), 100)
-create_xmlid('project.tags', get_target_id_from_source_id(
-    'project.tags', 259), 260)
+# source.env['project.category'].search([('name', '=', 'packning')])      # [76, 77]
+# source.env['project.category'].search([('name', '=', 'El')])            # [96, 100]
+# source.env['project.category'].search([('name', '=', 'Release 1')])     # [259, 260]
+# source.env['project.category'].search([('name', '=', 'Dokumentation')]) # [25, 266]
+create_xmlid('project.tags',
+             get_target_id_from_source_id('project.tags', 76), 77)
+create_xmlid('project.tags',
+             get_target_id_from_source_id('project.tags', 96), 100)
+create_xmlid('project.tags',
+             get_target_id_from_source_id('project.tags', 259), 260)
+create_xmlid('project.tags',
+             get_target_id_from_source_id('project.tags', 25), 266)
 
 
 'project.project'
-project_project_calc = {'privacy_visibility': """
+project_calc = {'privacy_visibility': """
 vals.update(
     {fields[key]: 'portal' if record[key] in ['public'] else record[key]})"""}
-migrate_model('project.project', calc=project_project_calc)
+migrate_model('project.project', calc=project_calc)
 
 
 'account.analytic.account mapping'
-for pid in sorted(source.env['project.project'].search([])):
+for pid in source.env['project.project'].search([], order='id'):
     source_id = source.env['project.project'].read(
         pid, ['analytic_account_id'])['analytic_account_id'][0]
     pid_target = get_target_id_from_source_id('project.project', pid)
@@ -68,22 +78,34 @@ for pid in sorted(source.env['project.project'].search([])):
 
 'project.task'
 # project_ids = [30, 55] # priority projects
-project_task_calc = {'priority': """if key in fields:
+task_calc = {'priority': """if key in fields:
         vals.update({fields[key]: '0' if record[key] in ['0','1'] else '1'})""",
-                     'categ_ids': """vals.update({'tag_ids':[get_target_id_from_source_id('project.tags',_id) for _id in record[key]]})"""
-                     }
+             'categ_ids': """vals.update({'tag_ids':[get_target_id_from_source_id('project.tags',_id) for _id in record[key]]})"""
+             }
+task_context = {'mail_create_nosubscribe': True,
+                'mail_create_nolog': True,
+                'mail_notrack': True,
+                'tracking_disable': True}
+task_diff = {'categ_ids': 'tag_ids',
+             'date_start': 'date_assign'}
+task_domain = [('project_id', '!=', 55)]
 migrate_model('project.task',
-              calc=project_task_calc,
-              diff={'categ_ids': 'tag_ids'},
-              exclude=['message_follower_ids'])
+              calc=task_calc,
+              context=task_context,
+              create=1,
+              diff=task_diff,
+              domain=task_domain,
+              exclude=['message_follower_ids'],
+              )
 
 
-# migrate_model('project.scrum.actors')
-# migrate_model('project.scrum.portfolio')
-# migrate_model('project.scrum.sprint')
-# migrate_model('project.scrum.us')
-# migrate_model('project.scrum.timebox')
-# migrate_model('project.scrum.test')
+migrate_model('project.scrum.actors')   # empty
+migrate_model('project.scrum.meeting')  # empty
+migrate_model('project.scrum.test')     # empty
+migrate_model('project.scrum.us')       # 1 record
+migrate_model('project.scrum.portfolio')
+migrate_model('project.scrum.sprint')
+migrate_model('project.scrum.timebox')
 
 
 'project.task.work -> account.analytic.line'
@@ -105,17 +127,18 @@ for work_id in work_records:
     if line:
         line = line[0]
 
-    if create:
-        if line in line_ids:
-            continue
+    if line in line_ids and create:
+        continue
+
     vals = {}
 
     task = work_record.get('task_id')
     if task:
+        task = task[0]
         vals.update(
-            {'task_id': get_target_id_from_source_id('project.task', task[0])})
+            {'task_id': get_target_id_from_source_id('project.task', task)})
 
-        task_record = task_records.get(task[0])
+        task_record = task_records.get(task)
 
         employee = False
         user = work_record.get('user_id')
@@ -134,45 +157,57 @@ for work_id in work_records:
         if project:
             vals.update(
                 {'project_id': get_target_id_from_source_id('project.project', project[0])})
-    # print('work_record', work_record)
-    # print('timesheet', timesheet)
-    # print('line', line)
-    # print('task', task)
-    # print('user', user)
-    # print('employee', employee)
-    # print('project', project)
+
     print(vals)
     migrate_model('account.analytic.line',
+                  context=task_context,
                   create=create,
                   custom=vals,
                   ids=[line])
-    input()
+    line_ids.append(line)
 
 
+create = 1
 migrated_message_ids = target.env['ir.model.data'].find_all_ids_in_target(
     'mail.message')
+task_context = {'mail_create_nosubscribe': True,
+                'mail_create_nolog': True,
+                'mail_notrack': True,
+                'tracking_disable': True}
+task_domain = [('project_id', '!=', 55)]
 task_records = {x.get('id'): x for x in source.env['project.task'].search_read(
-    [], ['message_ids'], order='id')}
+    task_domain, ['message_ids'], order='id')}
 for task_id in task_records:
     task_record = task_records.get(task_id)
-
-    target_id = get_target_id_from_source_id('project.task', task_id)
-
     message_ids = sorted(task_record.get('message_ids'))
+    to_migrate = []
     for message_id in message_ids:
         if create:
             if message_id in migrated_message_ids:
+                print(message_id, 'is migrated, skipping creation')
                 continue
+            to_migrate.append(message_id)
+        else:
+            if message_id not in migrated_message_ids:
+                print(message_id, 'is not migrated yet, write failed')
+                continue
+            to_migrate.append(message_id)
+
+    if to_migrate:
+        print(to_migrate)
+        target_id = get_target_id_from_source_id('project.task', task_id)
         migrate_model('mail.message',
+                      context=task_context,
                       create=create,
                       custom={'res_id': target_id},
                       exclude=['notified_partner_ids', 'tracking_value_ids'],
-                      ids=[message_id])
-
+                      ids=to_migrate)
+    else:
+        continue
     print(f"Recordset('project.task', [{task_id}]).message_ids DONE!")
 
 
-'''
+"""
 
 
 # Install 'en_US' for res.partner
@@ -524,4 +559,4 @@ for source_id in source_ids:
                 'field': field_id}, ids=[tracking_value_id])
     print(f"Recordset('{model}', [{source_id}]).message_ids DONE!")
 
-'''
+"""
